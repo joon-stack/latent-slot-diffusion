@@ -46,11 +46,12 @@ from src.parser import parse_args
 
 from src.models.utils import ColorMask
 
+from src.models.transformer_decoder import LatentPredictor
+
 if is_wandb_available():
     import wandb
 
 logger = get_logger(__name__)
-
 
 @torch.no_grad()
 def log_validation(
@@ -190,7 +191,6 @@ def log_validation(
 
     return images
 
-
 def main(args):
     logging_dir = Path(args.output_dir, args.logging_dir)
 
@@ -271,8 +271,9 @@ def main(args):
             f"Unknown unet config {args.unet_config}")
     slot_attn_config = MultiHeadSTEVESA.load_config(args.slot_attn_config)
     slot_attn = MultiHeadSTEVESA.from_config(slot_attn_config)
+    
     if os.path.exists(args.unet_config):
-        train_unet = True
+        train_unet = False
         unet_config = UNet2DConditionModelWithPos.load_config(args.unet_config)
         unet = UNet2DConditionModelWithPos.from_config(unet_config)
     elif args.unet_config == "pretrain_sd":
@@ -286,9 +287,16 @@ def main(args):
     else:
         raise ValueError(
             f"Unknown unet config {args.unet_config}")
+    
+    # get slot info
+    slot_size = slot_attn_config['slot_size']
+    num_slots = slot_attn_config['num_slots']
+    latent_size = slot_size
+
+    # define latent predictor
+    latentPredictor = LatentPredictor(latent_size=latent_size)
 
     # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
-
     def save_model_hook(models, weights, output_dir):
         if accelerator.is_main_process:
             for model in models:
@@ -389,6 +397,10 @@ def main(args):
             f"Slot Attn loaded as datatype {accelerator.unwrap_model(slot_attn).dtype}. {low_precision_error_string}"
         )
 
+    if accelerator.unwrap_model(latentPredictor).dtype != torch.float32:
+        raise ValueError(
+            f"Latent Predictor loaded as datatype {accelerator.unwrap_model(latentPredictor).dtype}. {low_precision_error_string}"
+        )
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
     if args.allow_tf32:
@@ -414,18 +426,11 @@ def main(args):
         optimizer_class = torch.optim.AdamW
 
 
-    params_to_optimize = list(slot_attn.parameters()) + \
-        (list(backbone.parameters()) if train_backbone else []) + \
-        (list(unet.parameters()) if train_unet else [])
+    params_to_optimize = list(latentPredictor.parameters())
     params_group = [
-        {'params': list(slot_attn.parameters()) + \
-         (list(backbone.parameters()) if train_backbone else []),
-         'lr': args.learning_rate * args.encoder_lr_scale}
+        {'params': params_to_optimize,
+        'lr': args.learning_rate * args.encoder_lr_scale}
     ]
-    if train_unet:
-        params_group.append(
-            {'params': unet.parameters(), "lr": args.learning_rate}
-        )
 
     optimizer = optimizer_class(
         params_group,
@@ -441,14 +446,19 @@ def main(args):
         optimizer, lr_lambda=[lambda _: 1, lambda _: 1] if train_unet else [lambda _: 1]
         )
 
-    train_dataset = GlobDataset(
-        root=args.dataset_root,
-        img_size=args.resolution,
-        img_glob=args.dataset_glob,
-        data_portion=(0.0, args.train_split_portion),
-        vit_norm=args.backbone_config == "pretrain_dino",
-        random_flip=args.flip_images,
-        vit_input_resolution=args.vit_input_resolution
+    # train_dataset = GlobDataset(
+    #     root=args.dataset_root,
+    #     img_size=args.resolution,
+    #     img_glob=args.dataset_glob,
+    #     data_portion=(0.0, args.train_split_portion),
+    #     vit_norm=args.backbone_config == "pretrain_dino",
+    #     random_flip=args.flip_images,
+    #     vit_input_resolution=args.vit_input_resolution
+    # )
+    train_dataset = GSDataset(
+        data_split='language_table_blocktoblock_4block_sim',
+        section='train',
+        img_size=256,
     )
 
     train_dataloader = torch.utils.data.DataLoader(
@@ -458,14 +468,17 @@ def main(args):
         num_workers=args.dataloader_num_workers,
     )
 
-    # validation set is only for visualization
-    val_dataset = GlobDataset(
-        root=args.dataset_root,
-        img_size=args.resolution,
-        img_glob=args.dataset_glob,
-        data_portion=(args.train_split_portion if args.train_split_portion < 1. else 0.9, 1.0),
-        vit_norm=args.backbone_config == "pretrain_dino",
-        vit_input_resolution=args.vit_input_resolution
+    val_dataset = GSDataset(
+        data_split='language_table_blocktoblock_4block_sim',
+        section='validation',
+        img_size=256,
+    )
+
+    val_dataloader = torch.utils.data.DataLoader(
+        val_dataset,
+        batch_size=len(val_dataset),
+        shuffle=False,
+        num_workers=args.dataloader_num_workers,
     )
 
     # Scheduler and math around the number of training steps.
@@ -486,6 +499,7 @@ def main(args):
     if train_unet:
         unet = accelerator.prepare(unet)
 
+    latentPredictor = accelerator.prepare(latentPredictor)
     # For mixed precision training we cast all non-trainable weigths (vae, non-lora text_encoder and non-lora unet) to half-precision
     # as these weights are only used for inference, keeping weights in full precision is not required.
     weight_dtype = torch.float32
@@ -503,6 +517,8 @@ def main(args):
             pass
     if not train_unet:
         unet.to(accelerator.device, dtype=weight_dtype)
+    dsafv
+    slot_attn.to(accelerator.device, dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(
@@ -578,38 +594,62 @@ def main(args):
         position=0, leave=True
     )
 
+    # use a more efficient scheduler at test time
+    module = importlib.import_module("diffusers")
+    scheduler_class = getattr(module, args.validation_scheduler)
+    scheduler = scheduler_class.from_config(
+        scheduler.config, **scheduler_args)
+
+    pipeline = StableDiffusionPipeline(
+        vae=vae,
+        text_encoder=None,
+        tokenizer=None,
+        unet=unet,
+        scheduler=scheduler,
+        safety_checker=None,
+        feature_extractor=None,
+        requires_safety_checker=None,
+    )
+
+    generator = None if args.seed is None else torch.Generator(
+        device=accelerator.device).manual_seed(args.seed)
+
     for epoch in range(first_epoch, args.num_train_epochs):
         if train_unet:
             unet.train()
         if train_backbone:
             backbone.train()
-        slot_attn.train()
+        # slot_attn.train()
+        latentPredictor.train()
+        
         for step, batch in enumerate(train_dataloader):
-            pixel_values = batch["pixel_values"].to(dtype=weight_dtype)
-            print(pixel_values.shape)
+            x = batch['x'].to(dtype=weight_dtype)
+            y = batch['y'].to(dtype=weight_dtype)
+            ins = batch['ins'].to(dtype=weight_dtype)
+            pixel_values = x
 
-            # Convert images to latent space
-            model_input = vae.encode(pixel_values).latent_dist.sample()
-            model_input = model_input * vae.config.scaling_factor
+            # # Convert images to latent space
+            # model_input = vae.encode(pixel_values).latent_dist.sample()
+            # model_input = model_input * vae.config.scaling_factor
 
-            # Sample noise that we'll add to the model input
-            if args.offset_noise:
-                noise = torch.randn_like(model_input) + 0.1 * torch.randn(
-                    model_input.shape[0], model_input.shape[1], 1, 1, device=model_input.device
-                )
-            else:
-                noise = torch.randn_like(model_input)
-            bsz, channels, height, width = model_input.shape
-            # Sample a random timestep for each image
-            timesteps = torch.randint(
-                0, noise_scheduler.config.num_train_timesteps, (bsz,), device=model_input.device
-            )
-            timesteps = timesteps.long()
+            # # Sample noise that we'll add to the model input
+            # if args.offset_noise:
+            #     noise = torch.randn_like(model_input) + 0.1 * torch.randn(
+            #         model_input.shape[0], model_input.shape[1], 1, 1, device=model_input.device
+            #     )
+            # else:
+            #     noise = torch.randn_like(model_input)
+            # bsz, channels, height, width = model_input.shape
+            # # Sample a random timestep for each image
+            # timesteps = torch.randint(
+            #     0, noise_scheduler.config.num_train_timesteps, (bsz,), device=model_input.device
+            # )
+            # timesteps = timesteps.long()
 
-            # Add noise to the model input according to the noise magnitude at each timestep
-            # (this is the forward diffusion process)
-            noisy_model_input = noise_scheduler.add_noise(
-                model_input, noise, timesteps)
+            # # Add noise to the model input according to the noise magnitude at each timestep
+            # # (this is the forward diffusion process)
+            # noisy_model_input = noise_scheduler.add_noise(
+            #     model_input, noise, timesteps)
 
             # timestep is not used, but should we?
             if args.backbone_config == "pretrain_dino":
@@ -619,17 +659,33 @@ def main(args):
                 feat = backbone(pixel_values)
             slots, attn = slot_attn(feat[:, None])  # for the time dimension
             slots = slots[:, 0]
+            
 
-            print(f"slots: {slots}, slots shpae: {slots.shape}")
+            print(f"slots: {slots}, slots shape: {slots.shape}")
+
+            images_gen = pipeline(
+                prompt_embeds=slots,
+                height=args.resolution,
+                width=args.resolution,
+                num_inference_steps=25,
+                generator=generator,
+                guidance_scale=1.,
+                output_type="pt",
+            ).images
+
 
             if not train_unet:
                 slots = slots.to(dtype=weight_dtype)
 
             # Predict the noise residual
-            model_pred = unet(
-                noisy_model_input, timesteps, slots,
-            ).sample
+            # model_pred = unet(
+            #     noisy_model_input, timesteps, slots,
+            # ).sample
+            
+            model_pred = latentPredictor(ins, x)
 
+        
+            
             # Get the target for loss depending on the prediction type
             if noise_scheduler.config.prediction_type == "epsilon":
                 target = noise

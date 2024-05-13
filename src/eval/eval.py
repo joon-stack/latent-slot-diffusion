@@ -311,6 +311,7 @@ with torch.no_grad():
                 miou_list_no_bg_average_over_images.append(
                     torch.stack(miou_no_bg_per_img).mean())
                 mbo_list_no_bg_average_over_images.append(
+                    torch.stack(mbo_no_bg_per_img).mean())
 
         total_data += pixel_values.shape[0]
         progress_bar.update(1)
