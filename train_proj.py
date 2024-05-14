@@ -23,6 +23,7 @@ from huggingface_hub import create_repo
 from packaging import version
 from PIL import Image
 from tqdm.auto import tqdm
+from torchvision import transforms
 
 import diffusers
 from diffusers import (
@@ -40,7 +41,7 @@ from einops import rearrange, reduce, repeat
 from src.models.backbone import UNetEncoder
 from src.models.slot_attn import MultiHeadSTEVESA
 from src.models.unet_with_pos import UNet2DConditionModelWithPos
-from src.data.dataset import GlobDataset
+from src.data.dataset import GlobDataset, GSDataset
 
 from src.parser import parse_args
 
@@ -397,10 +398,10 @@ def main(args):
             f"Slot Attn loaded as datatype {accelerator.unwrap_model(slot_attn).dtype}. {low_precision_error_string}"
         )
 
-    if accelerator.unwrap_model(latentPredictor).dtype != torch.float32:
-        raise ValueError(
-            f"Latent Predictor loaded as datatype {accelerator.unwrap_model(latentPredictor).dtype}. {low_precision_error_string}"
-        )
+    # if accelerator.unwrap_model(latentPredictor).dtype != torch.float32:
+    #     raise ValueError(
+    #         f"Latent Predictor loaded as datatype {accelerator.unwrap_model(latentPredictor).dtype}. {low_precision_error_string}"
+    #     )
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
     if args.allow_tf32:
@@ -455,11 +456,7 @@ def main(args):
     #     random_flip=args.flip_images,
     #     vit_input_resolution=args.vit_input_resolution
     # )
-    train_dataset = GSDataset(
-        data_split='language_table_blocktoblock_4block_sim',
-        section='train',
-        img_size=256,
-    )
+    train_dataset = torch.load("/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_4block_sim_predict1_train.pth")
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -468,11 +465,7 @@ def main(args):
         num_workers=args.dataloader_num_workers,
     )
 
-    val_dataset = GSDataset(
-        data_split='language_table_blocktoblock_4block_sim',
-        section='validation',
-        img_size=256,
-    )
+    val_dataset = torch.load("/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_4block_sim_predict1_val.pth")
 
     val_dataloader = torch.utils.data.DataLoader(
         val_dataset,
@@ -480,6 +473,8 @@ def main(args):
         shuffle=False,
         num_workers=args.dataloader_num_workers,
     )
+
+    print("Train, Val dataset loaded")
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -499,7 +494,7 @@ def main(args):
     if train_unet:
         unet = accelerator.prepare(unet)
 
-    latentPredictor = accelerator.prepare(latentPredictor)
+    
     # For mixed precision training we cast all non-trainable weigths (vae, non-lora text_encoder and non-lora unet) to half-precision
     # as these weights are only used for inference, keeping weights in full precision is not required.
     weight_dtype = torch.float32
@@ -517,7 +512,6 @@ def main(args):
             pass
     if not train_unet:
         unet.to(accelerator.device, dtype=weight_dtype)
-    dsafv
     slot_attn.to(accelerator.device, dtype=weight_dtype)
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
@@ -584,6 +578,7 @@ def main(args):
     else:
         initial_global_step = 0
 
+    # latentPredictor = accelerator.prepare(latentPredictor)
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(
         range(0, args.max_train_steps),
@@ -593,12 +588,21 @@ def main(args):
         disable=not accelerator.is_local_main_process,
         position=0, leave=True
     )
+    scheduler_args = {}
+
+    if "variance_type" in noise_scheduler.config:
+        variance_type = noise_scheduler.config.variance_type
+
+        if variance_type in ["learned", "learned_range"]:
+            variance_type = "fixed_small"
+
+        scheduler_args["variance_type"] = variance_type
 
     # use a more efficient scheduler at test time
     module = importlib.import_module("diffusers")
     scheduler_class = getattr(module, args.validation_scheduler)
     scheduler = scheduler_class.from_config(
-        scheduler.config, **scheduler_args)
+        noise_scheduler.config, **scheduler_args)
 
     pipeline = StableDiffusionPipeline(
         vae=vae,
@@ -661,17 +665,9 @@ def main(args):
             slots = slots[:, 0]
             
 
-            print(f"slots: {slots}, slots shape: {slots.shape}")
+            print(f"slots shape: {slots.shape}")
 
-            images_gen = pipeline(
-                prompt_embeds=slots,
-                height=args.resolution,
-                width=args.resolution,
-                num_inference_steps=25,
-                generator=generator,
-                guidance_scale=1.,
-                output_type="pt",
-            ).images
+            
 
 
             if not train_unet:
@@ -682,19 +678,51 @@ def main(args):
             #     noisy_model_input, timesteps, slots,
             # ).sample
             
-            model_pred = latentPredictor(ins, x)
+            ins = ins.permute(1, 0, 2)
+            slots = slots.permute(1, 0, 2)
+            print(ins.shape, slots.shape)
+            model_pred = latentPredictor(ins, slots).permute(1, 0, 2)
+            print("PRED", model_pred.shape)
+            print("LABEL", y.shape)
 
-        
+            images_gen_before = pipeline(
+                prompt_embeds=slots,
+                height=args.resolution,
+                width=args.resolution,
+                num_inference_steps=25,
+                generator=generator,
+                guidance_scale=1.,
+                output_type="pt",
+            ).images
+            
+
+            images_gen = pipeline(
+                prompt_embeds=model_pred,
+                height=args.resolution,
+                width=args.resolution,
+                num_inference_steps=25,
+                generator=generator,
+                guidance_scale=1.,
+                output_type="pt",
+            ).images
+
+            to_pil = transforms.ToPILImage()
+            img = to_pil(images_gen[0]) 
+            img.save('/home/s2/youngjoonjeong/github/latent-slot-diffusion/log.png')
+            img_before = to_pil(images_gen_before[0])
+            img_before.save('/home/s2/youngjoonjeong/github/latent-slot-diffusion/log_before.png')
+            print(images_gen)
+            print(images_gen.shape)
             
             # Get the target for loss depending on the prediction type
-            if noise_scheduler.config.prediction_type == "epsilon":
-                target = noise
-            elif noise_scheduler.config.prediction_type == "v_prediction":
-                target = noise_scheduler.get_velocity(
-                    model_input, noise, timesteps)
-            else:
-                raise ValueError(
-                    f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+            # if noise_scheduler.config.prediction_type == "epsilon":
+            #     target = noise
+            # elif noise_scheduler.config.prediction_type == "v_prediction":
+            #     target = noise_scheduler.get_velocity(
+            #         model_input, noise, timesteps)
+            # else:
+            #     raise ValueError(
+            #         f"Unknown prediction type {noise_scheduler.config.prediction_type}")
 
             # Compute instance loss
             if args.snr_gamma is None:

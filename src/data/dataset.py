@@ -86,8 +86,10 @@ class GlobDataset(Dataset):
     def __getitem__(self, i):
         example = {}
         image = Image.open(self.episodes[i])
+        # print(image)
         if not image.mode == "RGB":
             image = image.convert("RGB")
+        # print(image)
         if self.random_flip:
             if random.random() > 0.5:
                 image = image.transpose(Image.FLIP_LEFT_RIGHT)
@@ -107,11 +109,19 @@ class GSDataset(Dataset):
 
 
         if local:
-            ds, ds_info = tfds.load("0.0.1", 
-                                    data_dir='/home/s2/youngjoonjeong/datasets', with_info=True)
+            ds, ds_info = tfds.load('datasets:0.0.1', data_dir='/home/s2/youngjoonjeong/', with_info=True,
+                                    download=False,
+            # download_and_prepare_kwargs={'download_config': tfds.download.DownloadConfig(
+            #                             max_workers=4  # 동시에 처리할 최대 작업자 수
+            #                         )}
+                                    )
         else:
             ds, ds_info = tfds.load(f"{data_split}:0.0.1", 
-                                    data_dir='gs://gresearch/robotics', with_info=True)
+                                    data_dir='gs://gresearch/robotics', with_info=True, download=False
+                                    # download_and_prepare_kwargs={'download_config': tfds.download.DownloadConfig(
+                                    #     max_workers=4  # 동시에 처리할 최대 작업자 수
+                                    # )}
+                                    )
 
         # dataset_path = os.path.join('gs://gresearch/robotics/', data_split, "0.0.1") 
         # builder = tfds.builder_from_directory(dataset_path)
@@ -133,6 +143,7 @@ class GSDataset(Dataset):
         x_list = []
         y_list = []
         ins_list = []
+        tmp = 2
         for i, record in enumerate(data_iter):
             steps = list(record['steps'])
             # extract frames based on the predict_steps (how many steps will y contains)
@@ -143,20 +154,27 @@ class GSDataset(Dataset):
                 img = step['observation']['rgb']
                 ins = step['observation']['instruction']
                 if i == 0:
-                    x_list += [torch.from_numpy(img)]
+                    # x_list += [torch.from_numpy(img)]
+                    x_list += [img]
                 else:
-                    y_step_list += [torch.from_numpy(img)]
+                    # y_step_list += [torch.from_numpy(img)]
+                    y_step_list += [img]
+            if len(y_step_list) != tmp:
+                tmp = len(y_step_list)
+                sprint(len(y_step_list))
 
-            y_list += [torch.stack(y_step_list)]
+            y_list += [np.stack(y_step_list)]
             ins_decode = decode_inst(ins)
             ins_list += [ins_decode.strip()]
             
-        x_list_cat = torch.stack(x_list)
-        y_list_cat = torch.stack(y_list)
+        x_list_cat = np.stack(x_list)
+        y_list_cat = np.stack(y_list)
         tok = tokenizer(ins_list, padding=True, truncation=True, return_tensors='pt')
-        ins_list_cat = model(tok['input_ids'], tok['attention_mask']).last_hidden_state
+        ins_list_cat = model(tok['input_ids'], tok['attention_mask']).last_hidden_state.detach().numpy()
 
         self.length = ins_list_cat.shape[0]
+
+        print(type(x_list_cat), type(y_list_cat), type(ins_list_cat))
                 
     
         self.data_list = {'x': x_list_cat, 'y': y_list_cat, 'ins': ins_list_cat}
@@ -168,13 +186,16 @@ class GSDataset(Dataset):
         self.transform = transforms.Compose([
             # transforms.Resize(img_size, interpolation=torchvision.transforms.InterpolationMode.BILINEAR),
             # transforms.CenterCrop(img_size),
-            transforms.Resize((img_size, img_size), interpolation=torchvision.transforms.InterpolationMode.BILINEAR),
+            # transforms.ToPILImage(),
             transforms.ToTensor(),
+            transforms.Resize((img_size, img_size), interpolation=torchvision.transforms.InterpolationMode.BILINEAR),
+            
             transforms.Normalize(mean=[0.5], std=[0.5])
         ])
 
         if vit_norm:
             self.transform_vit = transforms.Compose([
+                
                 transforms.Resize(vit_input_resolution, interpolation=torchvision.transforms.InterpolationMode.BILINEAR),
                 transforms.CenterCrop(vit_input_resolution),
                 transforms.ToTensor(),
@@ -190,15 +211,29 @@ class GSDataset(Dataset):
 
     def __getitem__(self, i):
         example = {}
-        x = torch.FloatTensor(self.data_list['x'][i])
-        y = torch.FloatTensor(self.data_list['y'][i])
-        ins = torch.FloatTensor(self.data_list['ins'][i])
-    
+        # x = torch.FloatTensor(self.data_list['x'][i])
+        # y = torch.FloatTensor(self.data_list['y'][i])
+        # ins = torch.FloatTensor(self.data_list['ins'][i])
+        x = self.data_list['x'][i]
+        y = self.data_list['y'][i]
+        ins = self.data_list['ins'][i]
+        # print(x.shape, y.shape, ins.shape)
+        if y.ndim >= 4:
+            y = y.squeeze()
+        
         # if self.random_flip:
         #     if random.random() > 0.5:
         #         x = image.transpose(Image.FLIP_LEFT_RIGHT)
         x = self.transform(x)
-        y = self.transform(y)
+        if y.ndim >= 4:
+            img_list = []
+            y = y.permute(1, 0, 2, 3)
+            for img in y:
+                img_list += self.transform(y)
+            y = torch.stack(y)
+            y = y.permute(1, 0, 2, 3)
+        else:
+            y = self.transform(y)
         example["x"] = x
         example["y"] = y
         example["ins"] = ins
@@ -245,6 +280,15 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
+    # dataset = GlobDataset(
+    #     root="/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_4block_sim/language_table_blocktoblock_4block_sim/language_table_blocktoblock_4block_sim-train-with-label/images/",
+    #     img_size=256,
+    #     img_glob="**/*.png",
+    #     data_portion=(0.0, 0.9)
+    # )
+    # pass
+    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+
     dataset = GSDataset(
         data_split=args.data_split,
         section=args.section,
@@ -252,18 +296,45 @@ if __name__ == "__main__":
         predict_steps=args.predict_steps,
     )
     print(dataset)
-    torch.save(dataset, f'/shared/s2/lab01/dataset/lsd/{args.data_split}_predict{args.predict_steps}_{args.train}.pth')
+
+    train_dataloader = torch.utils.data.DataLoader(
+                                                    dataset,
+                                                    batch_size=16,
+                                                    shuffle=True,
+                                                    num_workers=4,
+    )
+    for i, x in enumerate(train_dataloader):
+        if i >= 1:
+            break
+        print(x['x'][0], x['y'][0], x['ins'][0])
+
+    torch.save(dataset, f'/shared/s2/lab01/dataset/lsd/{args.data_split}_predict{args.predict_steps}_{args.section}.pth', pickle_protocol=4)
     print("saved successfully")
-    dataset_loaded = torch.load(f'/shared/s2/lab01/dataset/lsd/{args.data_split}_predict{args.predict_steps}_{args.train}.pth')
+
+    dataset_loaded = torch.load(f'/shared/s2/lab01/dataset/lsd/{args.data_split}_predict{args.predict_steps}_{args.section}.pth')
+
     train_dataloader = torch.utils.data.DataLoader(
                                                     dataset_loaded,
                                                     batch_size=16,
                                                     shuffle=True,
                                                     num_workers=4,
     )
+
     for i, x in enumerate(train_dataloader):
-        if i >= 2:
+        if i >= 1:
             break
-        print(x)
+        print(x['x'][0], x['y'][0], x['ins'][0])
+
+    # train_dataloader = torch.utils.data.DataLoader(
+    #     dataset,
+    #     batch_size=16,
+    #     shuffle=True,
+    #     num_workers=4
+    # )
+
+    # for i, x in enumerate(train_dataloader):
+    #     if i >= 1:
+    #         break
+    #     print(x)
     
     pass

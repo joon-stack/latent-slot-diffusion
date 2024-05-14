@@ -24,6 +24,6 @@ class LatentPredictor(nn.Module):
     def forward(self, memory, tgt):
         memory = self.bert_proj_layer(memory)
         tgt = self.slot_proj_layer(tgt)
-        out = transformer_decoder(tgt, memory)
+        out = self.transformer_decoder(tgt, memory)
         
         return out
