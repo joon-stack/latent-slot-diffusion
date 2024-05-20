@@ -77,6 +77,8 @@ for section in ["train", "validation", "test"]:
         position=0, leave=True
     )
     for i, record in enumerate(data_iter):
+        if i >= 8000:
+            break
         path_vid_images = os.path.join(out_path_images, f"{i:08}")
         os.makedirs(path_vid_images, exist_ok=True)
         path_vid_labels = os.path.join(out_path_labels, f"{i:08}")

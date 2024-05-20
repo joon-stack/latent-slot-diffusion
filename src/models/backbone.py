@@ -8,6 +8,7 @@ from diffusers.models.unet_2d import UNet2DModel, UNet2DOutput
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 
+
 class UNetEncoder(UNet2DModel):
 
     def __init__(
@@ -52,6 +53,7 @@ class UNetEncoder(UNet2DModel):
     ) -> Union[UNet2DOutput, Tuple]:
 
         sample = self.downscale_cnn(sample)
+        
         return self.original_forward(sample, timestep=0, class_labels=None).sample
 
 if __name__ == "__main__":

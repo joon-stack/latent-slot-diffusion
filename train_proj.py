@@ -11,6 +11,8 @@ import shutil
 import warnings
 from pathlib import Path
 
+import random
+
 import numpy as np
 import torch
 import torch.nn.functional as F
@@ -24,6 +26,8 @@ from packaging import version
 from PIL import Image
 from tqdm.auto import tqdm
 from torchvision import transforms
+
+from torch.utils.data import ConcatDataset
 
 import diffusers
 from diffusers import (
@@ -41,7 +45,7 @@ from einops import rearrange, reduce, repeat
 from src.models.backbone import UNetEncoder
 from src.models.slot_attn import MultiHeadSTEVESA
 from src.models.unet_with_pos import UNet2DConditionModelWithPos
-from src.data.dataset import GlobDataset, GSDataset
+from src.data.dataset import GlobDataset, GSDataset, GSLocalDataset
 
 from src.parser import parse_args
 
@@ -49,10 +53,41 @@ from src.models.utils import ColorMask
 
 from src.models.transformer_decoder import LatentPredictor
 
+
 if is_wandb_available():
     import wandb
 
 logger = get_logger(__name__)
+
+def greedy_match(a, b):
+    assert a.shape == b.shape, "Shape of a and b must be the same"
+    
+    batch_size = a.shape[0]
+    a = a.float()
+    b = b.float()
+    # 각 요소 간의 거리 계산
+    distances = torch.cdist(a.reshape(batch_size, -1), b.reshape(batch_size, -1), p=2)  # [batch_size, batch_size]    
+    # distances = distances ** 2 / batch_size
+    
+     # 그리디 매칭을 위한 초기화
+    matched_indices = []
+    remaining_b_indices = set(range(batch_size))
+    
+    for i in range(batch_size):
+        # 현재 a[i]에 대해 최소 거리를 가지는 b[j] 찾기
+        min_distance = float('inf')
+        best_j = -1
+        for j in remaining_b_indices:
+            if distances[i, j].item() < min_distance:
+                min_distance = distances[i, j].item()
+                best_j = j
+        
+        # 매칭된 b[j] 인덱스를 기록하고 이후 매칭에서 제외
+        matched_indices.append(best_j)
+        remaining_b_indices.remove(best_j)
+    
+    return matched_indices
+
 
 @torch.no_grad()
 def log_validation(
@@ -193,6 +228,7 @@ def log_validation(
     return images
 
 def main(args):
+    
     logging_dir = Path(args.output_dir, args.logging_dir)
 
     accelerator_project_config = ProjectConfiguration(
@@ -251,6 +287,7 @@ def main(args):
         train_backbone = True
         backbone_config = UNetEncoder.load_config(args.backbone_config)
         backbone = UNetEncoder.from_config(backbone_config)
+        backbone_val = UNetEncoder.from_config(backbone_config)
     elif args.backbone_config == "pretrain_dino":
         train_backbone = False
         dinov2 = torch.hub.load("facebookresearch/dinov2", "dinov2_vitb14")
@@ -292,10 +329,10 @@ def main(args):
     # get slot info
     slot_size = slot_attn_config['slot_size']
     num_slots = slot_attn_config['num_slots']
-    latent_size = slot_size
+    latent_size = args.proj_dim
 
     # define latent predictor
-    latentPredictor = LatentPredictor(latent_size=latent_size)
+    latentPredictor = LatentPredictor(slot_size=slot_size, latent_size=latent_size)
 
     # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
     def save_model_hook(models, weights, output_dir):
@@ -303,12 +340,13 @@ def main(args):
             for model in models:
 
                 # continue if not one of [UNetEncoder, MultiHeadSTEVESA, UNet2DConditionModelWithPos]
-                if not isinstance(model, (UNetEncoder, MultiHeadSTEVESA, UNet2DConditionModelWithPos)):
+                if not isinstance(model, LatentPredictor):
                     continue
 
-                sub_dir = model._get_name().lower()
+                # sub_dir = model._get_name().lower()
 
-                model.save_pretrained(os.path.join(output_dir, sub_dir))
+                # model.save_pretrained(os.path.join(output_dir, sub_dir))
+                torch.save(model.state_dict(), os.path.join(output_dir, 'model.pth'))
 
                 # make sure to pop weight so that corresponding model is not saved again
                 weights.pop()
@@ -333,15 +371,20 @@ def main(args):
                 load_model = UNet2DConditionModelWithPos.from_pretrained(
                     input_dir, subfolder=sub_dir)
                 model.register_to_config(**load_model.config)
+            elif isinstance(model, LatentPredictor):
+                model = LatentPredictor(latent_size=192)
             else:
                 raise ValueError(
                     f"Unknown model type {type(model)}")
 
-            model.load_state_dict(load_model.state_dict())
-            del load_model
+            # model.load_state_dict(load_model.state_dict())
+            # del load_model
+            model.load_state_dict(torch.load(os.path.join(input_dir, 'model.pth')))
 
     accelerator.register_save_state_pre_hook(save_model_hook)
     accelerator.register_load_state_pre_hook(load_model_hook)
+
+    os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
     vae.requires_grad_(False)
     if not train_backbone:
@@ -351,6 +394,10 @@ def main(args):
             pass
     if not train_unet:
         unet.requires_grad_(False)
+    backbone.requires_grad_(False)
+    backbone_val.requires_grad_(False)
+    unet.requires_grad_(False)
+    slot_attn.requires_grad_(False)
 
     if args.enable_xformers_memory_efficient_attention:
         if is_xformers_available():
@@ -364,6 +411,7 @@ def main(args):
             unet.enable_xformers_memory_efficient_attention()
             try:
                 backbone.enable_xformers_memory_efficient_attention()
+                backbone_val.enable_xformers_memory_efficient_attention()
             except AttributeError:
                 pass
         else:
@@ -374,6 +422,7 @@ def main(args):
         unet.enable_gradient_checkpointing()
         try:
             backbone.enable_gradient_checkpointing()
+            backbone_val.enable_gradient_checkpointing()
         except AttributeError:
                 pass
 
@@ -456,7 +505,93 @@ def main(args):
     #     random_flip=args.flip_images,
     #     vit_input_resolution=args.vit_input_resolution
     # )
-    train_dataset = torch.load("/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_4block_sim_predict1_train.pth")
+    # train_dataset = torch.load("/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_4block_sim_predict1_train.pth")
+
+    if args.concat_dataset:
+        dataset_1 = GSLocalDataset(
+            root='/shared/s2/lab01/dataset/lsd/language_table',
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='train',
+            predict_steps=1,
+        )
+        dataset_2 = GSLocalDataset(
+            root='/shared/s2/lab01/dataset/lsd/language_table_sim',
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='train',
+            predict_steps=1,
+        )
+        dataset_3 = GSLocalDataset(
+            root='/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_sim',
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='train',
+            predict_steps=1,
+        )
+        dataset_4 = GSLocalDataset(
+            root='/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_4block_sim',
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='train',
+            predict_steps=1,
+        )
+
+        train_dataset = ConcatDataset([dataset_1, dataset_2, dataset_3, dataset_4])
+
+        val_dataset_1 = GSLocalDataset(
+            root='/shared/s2/lab01/dataset/lsd/language_table',
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='val',
+            predict_steps=1,
+        )
+        val_dataset_2 = GSLocalDataset(
+            root='/shared/s2/lab01/dataset/lsd/language_table_sim',
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='val',
+            predict_steps=1,
+        )
+        val_dataset_3 = GSLocalDataset(
+            root='/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_sim',
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='val',
+            predict_steps=1,
+        )
+        val_dataset_4 = GSLocalDataset(
+            root='/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_4block_sim',
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='val',
+            predict_steps=1,
+        )
+
+        val_dataset = ConcatDataset([val_dataset_1, val_dataset_2, val_dataset_3, val_dataset_4])
+
+
+
+
+
+        
+    else:
+
+        train_dataset = GSLocalDataset(
+            root=args.dataset_root,
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='train',
+            predict_steps=1,
+        )
+
+        val_dataset = GSLocalDataset(
+            root=args.dataset_root,
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='val',
+            predict_steps=1,
+        )
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -465,12 +600,14 @@ def main(args):
         num_workers=args.dataloader_num_workers,
     )
 
-    val_dataset = torch.load("/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_4block_sim_predict1_val.pth")
+    # val_dataset = torch.load("/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_4block_sim_predict1_val.pth")
+
+    
 
     val_dataloader = torch.utils.data.DataLoader(
         val_dataset,
-        batch_size=len(val_dataset),
-        shuffle=False,
+        batch_size=16,
+        shuffle=True,
         num_workers=args.dataloader_num_workers,
     )
 
@@ -485,16 +622,18 @@ def main(args):
         overrode_max_train_steps = True
 
     # Prepare everything with our `accelerator`.
-    slot_attn, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-        slot_attn, optimizer, train_dataloader, lr_scheduler
+    slot_attn, optimizer, train_dataloader, lr_scheduler, val_dataloader = accelerator.prepare(
+        slot_attn, optimizer, train_dataloader, lr_scheduler, val_dataloader
     )
 
     if train_backbone:
         backbone = accelerator.prepare(backbone)
+        backbone_val = accelerator.prepare(backbone_val)
     if train_unet:
         unet = accelerator.prepare(unet)
 
-    
+    latentPredictor = accelerator.prepare(latentPredictor)  
+
     # For mixed precision training we cast all non-trainable weigths (vae, non-lora text_encoder and non-lora unet) to half-precision
     # as these weights are only used for inference, keeping weights in full precision is not required.
     weight_dtype = torch.float32
@@ -508,11 +647,44 @@ def main(args):
     if not train_backbone:
         try:
             backbone.to(accelerator.device, dtype=weight_dtype)
+            backbone_val.to(accelerator.device, dtype=weight_dtype)
         except:
             pass
     if not train_unet:
         unet.to(accelerator.device, dtype=weight_dtype)
     slot_attn.to(accelerator.device, dtype=weight_dtype)
+    latentPredictor.to(accelerator.device, dtype=weight_dtype)
+
+    
+    # Load pretrained model
+    input_dir = args.load_pretrain
+    # input_dir = os.path.join(args.output_dir, path)
+
+    load_model = UNetEncoder.from_pretrained(input_dir, subfolder='unetencoder')
+    backbone.register_to_config(**load_model.config)
+    backbone.load_state_dict(load_model.state_dict())
+    del load_model
+    print("UnetEncoder loaded")
+
+    load_model = UNetEncoder.from_pretrained(input_dir, subfolder='unetencoder')
+    backbone_val.register_to_config(**load_model.config)
+    backbone_val.load_state_dict(load_model.state_dict())
+    del load_model
+    print("UnetEncoder loaded")
+
+    load_model = MultiHeadSTEVESA.from_pretrained(input_dir, subfolder='MultiHeadSTEVESA'.lower())
+    slot_attn.register_to_config(**load_model.config)
+    slot_attn.load_state_dict(load_model.state_dict())
+    del load_model
+    print("MultiHeadSTEVESA loaded")
+
+    load_model = UNet2DConditionModelWithPos.from_pretrained(input_dir, subfolder='UNet2DConditionModelWithPos'.lower())
+    unet.register_to_config(**load_model.config)
+    unet.load_state_dict(load_model.state_dict())
+    del load_model
+    print("UNet2DConditionModelWithPos loaded")
+
+    
 
     # We need to recalculate our total training steps as the size of the training dataloader may have changed.
     num_update_steps_per_epoch = math.ceil(
@@ -578,7 +750,7 @@ def main(args):
     else:
         initial_global_step = 0
 
-    # latentPredictor = accelerator.prepare(latentPredictor)
+    
     # Only show the progress bar once on each machine.
     progress_bar = tqdm(
         range(0, args.max_train_steps),
@@ -618,137 +790,119 @@ def main(args):
     generator = None if args.seed is None else torch.Generator(
         device=accelerator.device).manual_seed(args.seed)
 
+    to_pil = transforms.ToPILImage()
+
+    backbone.eval()
+    backbone_val.eval()
+    slot_attn.eval()
+    unet.eval()
+
     for epoch in range(first_epoch, args.num_train_epochs):
-        if train_unet:
-            unet.train()
-        if train_backbone:
-            backbone.train()
+        # if train_unet:
+            # unet.train()
+        # if train_backbone:
+            # backbone.train()
         # slot_attn.train()
         latentPredictor.train()
         
         for step, batch in enumerate(train_dataloader):
+            # if step >= 1:
+            #     break
             x = batch['x'].to(dtype=weight_dtype)
             y = batch['y'].to(dtype=weight_dtype)
             ins = batch['ins'].to(dtype=weight_dtype)
             pixel_values = x
 
-            # # Convert images to latent space
-            # model_input = vae.encode(pixel_values).latent_dist.sample()
-            # model_input = model_input * vae.config.scaling_factor
-
-            # # Sample noise that we'll add to the model input
-            # if args.offset_noise:
-            #     noise = torch.randn_like(model_input) + 0.1 * torch.randn(
-            #         model_input.shape[0], model_input.shape[1], 1, 1, device=model_input.device
-            #     )
-            # else:
-            #     noise = torch.randn_like(model_input)
-            # bsz, channels, height, width = model_input.shape
-            # # Sample a random timestep for each image
-            # timesteps = torch.randint(
-            #     0, noise_scheduler.config.num_train_timesteps, (bsz,), device=model_input.device
-            # )
-            # timesteps = timesteps.long()
-
-            # # Add noise to the model input according to the noise magnitude at each timestep
-            # # (this is the forward diffusion process)
-            # noisy_model_input = noise_scheduler.add_noise(
-            #     model_input, noise, timesteps)
-
             # timestep is not used, but should we?
+            set_seed(args.seed)
             if args.backbone_config == "pretrain_dino":
                 pixel_values_vit = batch["pixel_values_vit"].to(dtype=weight_dtype)
                 feat = backbone(pixel_values_vit)
             else:
                 feat = backbone(pixel_values)
+            
+            # feat_test = torch.rand(feat.shape).to(accelerator.device)
+            # print(feat[0][0][0][0].item())
             slots, attn = slot_attn(feat[:, None])  # for the time dimension
+            # slots, attn = slot_attn(feat_test[:, None])  # for the time dimension
+            # print(feat_test[0][0][0][0].item(), slots[0][0][0][0].item())
             slots = slots[:, 0]
             
-
-            print(f"slots shape: {slots.shape}")
-
             
-
-
             if not train_unet:
                 slots = slots.to(dtype=weight_dtype)
 
-            # Predict the noise residual
-            # model_pred = unet(
-            #     noisy_model_input, timesteps, slots,
-            # ).sample
             
             ins = ins.permute(1, 0, 2)
             slots = slots.permute(1, 0, 2)
-            print(ins.shape, slots.shape)
+
             model_pred = latentPredictor(ins, slots).permute(1, 0, 2)
-            print("PRED", model_pred.shape)
-            print("LABEL", y.shape)
-
-            images_gen_before = pipeline(
-                prompt_embeds=slots,
-                height=args.resolution,
-                width=args.resolution,
-                num_inference_steps=25,
-                generator=generator,
-                guidance_scale=1.,
-                output_type="pt",
-            ).images
+            model_pred = model_pred.to(dtype=weight_dtype)
             
-
-            images_gen = pipeline(
-                prompt_embeds=model_pred,
-                height=args.resolution,
-                width=args.resolution,
-                num_inference_steps=25,
-                generator=generator,
-                guidance_scale=1.,
-                output_type="pt",
-            ).images
-
-            to_pil = transforms.ToPILImage()
-            img = to_pil(images_gen[0]) 
-            img.save('/home/s2/youngjoonjeong/github/latent-slot-diffusion/log.png')
-            img_before = to_pil(images_gen_before[0])
-            img_before.save('/home/s2/youngjoonjeong/github/latent-slot-diffusion/log_before.png')
-            print(images_gen)
-            print(images_gen.shape)
+            # images_gen_before = pipeline(
+            #     prompt_embeds=slots,
+            #     height=args.resolution,
+            #     width=args.resolution,
+            #     num_inference_steps=25,
+            #     generator=generator,
+            #     guidance_scale=1.,
+            #     output_type="pt",
+            # ).images
             
-            # Get the target for loss depending on the prediction type
-            # if noise_scheduler.config.prediction_type == "epsilon":
-            #     target = noise
-            # elif noise_scheduler.config.prediction_type == "v_prediction":
-            #     target = noise_scheduler.get_velocity(
-            #         model_input, noise, timesteps)
-            # else:
-            #     raise ValueError(
-            #         f"Unknown prediction type {noise_scheduler.config.prediction_type}")
+        
+            if args.compute_loss == 'image':
+                images_gen = pipeline(
+                    prompt_embeds=model_pred,
+                    height=args.resolution,
+                    width=args.resolution,
+                    num_inference_steps=25,
+                    generator=generator,
+                    guidance_scale=1.,
+                    output_type="pt",
+                ).images
+                print(images_gen.requires_grad)
+                images_gen.requires_grad_(True)
 
-            # Compute instance loss
-            if args.snr_gamma is None:
-                loss = F.mse_loss(model_pred.float(),
-                                  target.float(), reduction="mean")
+                target = y
+
+                # Compute instance loss
+
+                loss = F.mse_loss(images_gen.float(),
+                                    target.float(), reduction="mean")
+            
+            # compute loss in latent space
             else:
-                # Compute loss-weights as per Section 3.4 of https://arxiv.org/abs/2303.09556.
-                # Since we predict the noise instead of x_0, the original formulation is slightly changed.
-                # This is discussed in Section 4.2 of the same paper.
-                snr = compute_snr(noise_scheduler, timesteps)
-                base_weight = (
-                    torch.stack(
-                        [snr, args.snr_gamma * torch.ones_like(timesteps)], dim=1).min(dim=1)[0] / snr
-                )
+                # print(list(backbone.parameters())[0][0])
+                set_seed(args.seed)
+                feat_y = backbone(y)
+                # print(feat_y[0][0][0][0].item())
+                slots_y, attn = slot_attn(feat_y[:, None])  # for the time dimension
+                slots_y = slots_y[:, 0]
+                if not train_unet:
+                    slots_y = slots_y.to(dtype=weight_dtype)
+                slots_y = slots_y.permute(1, 0, 2)
+                model_pred = model_pred.permute(1, 0, 2)
+                # print(model_pred.shape, slots_y.shape)
+                idx = greedy_match(model_pred, slots_y)
+                
+                slots_y = slots_y[idx]
+                
+                
+                loss = F.mse_loss(model_pred, slots_y)
+                loss = loss.to(dtype=weight_dtype)
 
-                if noise_scheduler.config.prediction_type == "v_prediction":
-                    # Velocity objective needs to be floored to an SNR weight of one.
-                    mse_loss_weights = base_weight + 1
-                else:
-                    # Epsilon and sample both use the same loss weights.
-                    mse_loss_weights = base_weight
-                loss = F.mse_loss(model_pred.float(),
-                                  target.float(), reduction="none")
-                loss = loss.mean(
-                    dim=list(range(1, len(loss.shape)))) * mse_loss_weights
-                loss = loss.mean()
+                    
+
+            # img = to_pil(images_gen[0]) 
+            # img.save('/home/s2/youngjoonjeong/github/latent-slot-diffusion/log.png')
+            # img_before = to_pil(images_gen_before[0])
+            # img_before.save('/home/s2/youngjoonjeong/github/latent-slot-diffusion/log_before.png')
+            # img_ori = to_pil(batch['x'][0].mul(0.5).add_(0.5))
+            # img_ori.save('/home/s2/youngjoonjeong/github/latent-slot-diffusion/log_ori.png')
+
+            
+            
+
 
             loss = loss / args.gradient_accumulation_steps
 
@@ -803,18 +957,155 @@ def main(args):
                     images = []
 
                     if global_step % args.validation_steps == 0:
-                        images = log_validation(
-                            val_dataset=val_dataset,
-                            backbone=backbone,
-                            slot_attn=slot_attn,
-                            unet=unet,
-                            vae=vae,
-                            scheduler=noise_scheduler,
-                            args=args,
-                            accelerator=accelerator,
-                            weight_dtype=weight_dtype,
-                            global_step=global_step,
-                        )
+                        latentPredictor.eval()
+                        val_loss_sum = []
+                        for step_val, batch_val in enumerate(val_dataloader):
+                            x_val = batch['x'].to(dtype=weight_dtype)
+                            y_val = batch['y'].to(dtype=weight_dtype)
+                            ins_val = batch['ins'].to(dtype=weight_dtype)
+                            pixel_values_val = x
+
+                            set_seed(args.seed)
+
+                            # timestep is not used, but should we?
+                            if args.backbone_config == "pretrain_dino":
+                                pixel_values_vit = batch["pixel_values_vit"].to(dtype=weight_dtype)
+                                feat_val = backbone_val(pixel_values_vit)
+                            else:
+                                feat_val = backbone_val(pixel_values_val)
+                            slots_val, attn_val = slot_attn(feat[:, None])  # for the time dimension
+                            slots_val = slots_val[:, 0]
+                            
+                            if not train_unet:
+                                slots_val = slots_val.to(dtype=weight_dtype)
+
+                            ins_val = ins_val.permute(1, 0, 2)
+                            slots_val = slots_val.permute(1, 0, 2)
+
+                            model_pred_val = latentPredictor(ins_val, slots_val).permute(1, 0, 2)
+                            model_pred_val = model_pred_val.to(dtype=weight_dtype)
+
+                            if args.compute_loss == 'image':
+ 
+                                
+
+                                images_gen = pipeline(
+                                                        prompt_embeds=model_pred,
+                                                        height=args.resolution,
+                                                        width=args.resolution,
+                                                        num_inference_steps=25,
+                                                        generator=generator,
+                                                        guidance_scale=1.,
+                                                        output_type="pt",
+                                                    ).images
+
+                                target = y
+
+                                
+                                loss = F.mse_loss(images_gen.float(),
+                                    target.float(), reduction="mean")
+
+                                img = to_pil(images_gen[0]) 
+                                img.save(f'/home/s2/youngjoonjeong/github/latent-slot-diffusion/log_{global_step}.png')
+                            else:
+                                set_seed(args.seed)
+                                feat_y_val = backbone_val(y_val)
+                                slots_y_val, attn_val = slot_attn(feat_y_val[:, None])  # for the time dimension
+                                slots_y_val = slots_y_val[:, 0]
+                                if not train_unet:
+                                    slots_y_val = slots_y_val.to(dtype=weight_dtype)
+
+                                # slot shape should be [N, B, D] before computing distance
+                                if slots_y_val.shape[0] != num_slots:
+                                    slots_y_val = slots_y_val.permute(1, 0, 2)
+                                if model_pred_val.shape[0] != num_slots:
+                                    model_pred_val = model_pred_val.permute(1, 0, 2)
+                                # print(model_pred.shape, slots_y.shape)
+                            
+                                idx = greedy_match(model_pred_val, slots_y_val)
+                                # idx = greedy_match()
+                                slots_y_val = slots_y_val[idx]
+                                
+                                val_loss = F.mse_loss(model_pred_val, slots_y_val)
+                                val_loss = val_loss.to(dtype=weight_dtype)
+                                val_loss_sum += [val_loss.detach().item()]
+                        
+                        logs = {"val_loss": np.mean(val_loss_sum)}
+                        progress_bar.set_postfix(**logs)
+                        accelerator.log(logs, step=global_step)
+                            
+                        if global_step % args.paint_steps == 0:
+
+                            if slots_val.shape[0] == num_slots:
+                                slots_val = slots_val.permute(1, 0, 2)
+                            if slots_y_val.shape[0] == num_slots:
+                                slots_y_val = slots_y_val.permute(1, 0, 2)
+                            if model_pred_val.shape[0] == num_slots:
+                                model_pred_val = model_pred_val.permute(1, 0, 2)
+                                
+                            # slot shape should be [B, N, D] before entering diffusion model
+                            images_gen_x = pipeline(
+                                                    prompt_embeds=slots_val,
+                                                    height=args.resolution,
+                                                    width=args.resolution,
+                                                    num_inference_steps=50,
+                                                    generator=generator,
+                                                    guidance_scale=1.,
+                                                    output_type="pt",
+                                                ).images
+
+                            images_gen_pred = pipeline(
+                                                    prompt_embeds=model_pred_val,
+                                                    height=args.resolution,
+                                                    width=args.resolution,
+                                                    num_inference_steps=50,
+                                                    generator=generator,
+                                                    guidance_scale=1.,
+                                                    output_type="pt",
+                                                ).images
+
+                            images_gen_y = pipeline(
+                                                    prompt_embeds=slots_y_val,
+                                                    height=args.resolution,
+                                                    width=args.resolution,
+                                                    num_inference_steps=50,
+                                                    generator=generator,
+                                                    guidance_scale=1.,
+                                                    output_type="pt",
+                                                ).images
+                            
+                            logs = {'img_ori': [],
+                                    'img_tgt': [],
+                                    'img_ori_recon': [],
+                                    'img_tgt_recon': [],
+                                    'img_pred_recon': []
+                                    }
+                            for i in range(len(images_gen_x)):
+                                img_ori = to_pil(batch['x'][i].mul(0.5).add_(0.5))
+                                # img_ori.save('/home/s2/youngjoonjeong/github/latent-slot-diffusion/log_ori.png') 
+                                img_tgt = to_pil(batch['y'][i].mul(0.5).add_(0.5))
+                                # img_tgt.save('/home/s2/youngjoonjeong/github/latent-slot-diffusion/log_tgt.png') 
+                                img_x = to_pil(images_gen_x[i])
+                                # img_x.save('/home/s2/youngjoonjeong/github/latent-slot-diffusion/log_x.png')
+                                img_pred = to_pil(images_gen_pred[i]) 
+                                # img_pred.save(f'/home/s2/youngjoonjeong/github/latent-slot-diffusion/log_x_{global_step}_{args.proj_dim}.png')
+                                img_y = to_pil(images_gen_y[i]) 
+                                # img_y.save('/home/s2/youngjoonjeong/github/latent-slot-diffusion/log_y.png')
+                                logs['img_ori'].append(wandb.Image(img_ori))
+                                logs['img_tgt'].append(wandb.Image(img_tgt))
+                                logs['img_ori_recon'].append(wandb.Image(img_x))
+                                logs['img_tgt_recon'].append(wandb.Image(img_y))
+                                logs['img_pred_recon'].append(wandb.Image(img_pred))
+
+            
+                        accelerator.log(logs, step=global_step)
+                            
+                                
+
+
+                        
+                        
+
 
             logs = {"loss": loss.detach().item(
             ), "lr": lr_scheduler.get_last_lr()[0]}
@@ -823,7 +1114,8 @@ def main(args):
 
             if global_step >= args.max_train_steps:
                 break
-
+        
+        
     # Create the pipeline using using the trained modules and save it.
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:

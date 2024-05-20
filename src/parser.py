@@ -4,6 +4,41 @@ import warnings
 
 def parse_args(input_args=None):
     parser = argparse.ArgumentParser(description="Simple example of a training script.")
+
+    parser.add_argument(
+        "--compute_loss",
+        type=str,
+        default='latent',
+        choices=['latent', 'image'],
+        help='Where to compute losses, in latent or image space'
+    )
+
+    parser.add_argument(
+        "--proj_dim",
+        type=int,
+        default=192,
+        help='Dimension of projection layer (default=192=slot dim)'
+    )
+    
+    parser.add_argument(
+        "--load_pretrain",
+        type=str,
+        default=None,
+        help='Path of pretrained weights of backbone, unet, slotattn'
+    )
+
+    parser.add_argument(
+        "--concat_dataset",
+        action="store_true",
+        default=True,
+        help="Whether or not to use concat dataset",
+        
+    )
+
+
+
+
+
     parser.add_argument(
         "--pretrained_model_name",
         type=str,
@@ -163,6 +198,16 @@ def parse_args(input_args=None):
         "--validation_steps",
         type=int,
         default=100,
+        help=(
+            "Run validation every X steps. Validation consists of running the prompt"
+            " `args.validation_prompt` multiple times: `args.num_validation_images`"
+            " and logging the images."
+        ),
+    )
+    parser.add_argument(
+        "--paint_steps",
+        type=int,
+        default=5000,
         help=(
             "Run validation every X steps. Validation consists of running the prompt"
             " `args.validation_prompt` multiple times: `args.num_validation_images`"

@@ -21,12 +21,122 @@ def decode_inst(inst):
   return bytes(inst[np.where(inst != 0)].tolist()).decode("utf-8") 
 
 
+class GSLocalDataset(Dataset):
+    def __init__(self, root, img_size, section, predict_steps=1, img_glob='*.png', 
+                random_flip=False):
+
+        super().__init__()
+        # if isinstance(root, str) or not hasattr(root, '__iter__'):
+        #     root = [root]
+        #     img_glob = [img_glob]
+        img_glob = [img_glob]
+        root_img = [os.path.join(root, 'images', section)]
+        root_ins = os.path.join(root, 'labels', section)
+        self.root_img = root_img
+        self.root_ins = root_ins
+        self.img_size = img_size
+        self.episodes = {}
+        inst_raw = []
+        self.random_flip = random_flip
+        self.predict_steps = predict_steps
+
+        tokenizer = BertTokenizerFast.from_pretrained("google-bert/bert-base-uncased")
+        print("Tokenizer loaded successfully")
+
+        model = BertModel.from_pretrained("google-bert/bert-base-uncased")
+        print("BERT loaded successfully")
+
+        def extract_folder_name(file_path):
+            return file_path.split('/')[-2]
+
+        def encode(ins_list: list) -> torch.tensor:
+            tok = tokenizer(ins_list, padding=True, return_tensors='pt')
+            ins_list_cat = model(tok['input_ids'], tok['attention_mask']).last_hidden_state.detach().numpy()
+            return ins_list_cat
+            
+
+        for n, (r, g) in enumerate(zip(root_img, img_glob)):
+            episodes = glob.glob(os.path.join(r, g), recursive=True)
+            episodes = sorted(episodes)
+            numbers = sorted(list(map(extract_folder_name, episodes)))
+            numbers_no_overlap = sorted(list(set(list(map(extract_folder_name, episodes)))))
+            instructions = list(map(lambda x: os.path.join(root_ins, str(x) + '.npy'), numbers_no_overlap))
+
+            # self.episodes += episodes
+            # inst_raw += instructions
+        for k, v in zip(numbers, episodes):
+            if k in self.episodes:
+                self.episodes[k].append(v)
+            else:
+                self.episodes[k] = [v]
+        # self.episodes = dict(zip(numbers, episodes))
+        inst_raw += instructions
+        # print(self.episodes)
+
+        self.ids = list(self.episodes.keys())
+        self.episodes = list(self.episodes.values())
+
+        
+        self.instructions_nl = list(map(lambda x: decode_inst(np.load(x)), inst_raw))
+        self.instructions = encode(self.instructions_nl)
+        # print(self.episodes)
+        # print(list(self.episodes.values()))
+        # idx = -5
+        # key = list(self.episodes.keys())[idx]
+        # print(self.episodes[idx], inst_raw[idx], self.instructions[idx].shape, self.instructions_nl[idx])
+        # resize the shortest side to img_size and center crop
+        self.transform = transforms.Compose([
+            # transforms.Resize(img_size, interpolation=torchvision.transforms.InterpolationMode.BILINEAR),
+            # transforms.CenterCrop(img_size),
+            transforms.Resize((img_size, img_size), interpolation=torchvision.transforms.InterpolationMode.BILINEAR),
+            transforms.ToTensor(),
+            transforms.Normalize(mean=[0.5], std=[0.5])
+        ])
+
+    
+    def __len__(self):
+        return len(self.episodes)
+
+    def __getitem__(self, i):
+        example = {}
+        steps = self.episodes[i]
+        predict_idx = np.linspace(0, len(steps)- 1, self.predict_steps+1).astype(int)
+        x = Image.open(steps[predict_idx[0]])
+        if self.predict_steps <= 1:
+            y = steps[predict_idx[1]]
+        else:
+            y = []
+            for i in range(1, len(predict_idx)):
+                y.append(Image.open(steps[predict_idx[i]]))
+        if not x.mode == "RGB":
+            x = x.convert("RGB")
+        x = self.transform(x)
+        example['x'] = x
+        if self.predict_steps <= 1:
+            y = Image.open(y)
+            if not y.mode == "RGB":
+                y = y.convert("RGB")
+            y = self.transform(y)
+            example['y'] = y
+        else:
+            y_ = []
+            for img in y:
+                y_.append(self.transform(Image.open(img)))
+                example['y'] = y_
+        
+        example['ins'] = self.instructions[i]
+
+        return example
+
+
 
 class GlobDataset(Dataset):
     def __init__(self, root, img_size, img_glob='*.png', 
                  data_portion=(),  random_data_on_portion=True,
                 vit_norm=False, random_flip=False, vit_input_resolution=448):
         super().__init__()
+        
+        
         if isinstance(root, str) or not hasattr(root, '__iter__'):
             root = [root]
             img_glob = [img_glob]
@@ -161,7 +271,7 @@ class GSDataset(Dataset):
                     y_step_list += [img]
             if len(y_step_list) != tmp:
                 tmp = len(y_step_list)
-                sprint(len(y_step_list))
+                print(len(y_step_list))
 
             y_list += [np.stack(y_step_list)]
             ins_decode = decode_inst(ins)
@@ -184,9 +294,6 @@ class GSDataset(Dataset):
         
         # resize the shortest side to img_size and center crop
         self.transform = transforms.Compose([
-            # transforms.Resize(img_size, interpolation=torchvision.transforms.InterpolationMode.BILINEAR),
-            # transforms.CenterCrop(img_size),
-            # transforms.ToPILImage(),
             transforms.ToTensor(),
             transforms.Resize((img_size, img_size), interpolation=torchvision.transforms.InterpolationMode.BILINEAR),
             
@@ -243,6 +350,19 @@ class GSDataset(Dataset):
         return example
 
 if __name__ == "__main__":
+    dataset = GSLocalDataset(
+        root="/shared/s2/lab01/dataset/lsd/language_table",
+        # root='gs://gresearch/robotics/language_table/0.0.1/',
+        # root='/home/s2/youngjoonjeong/github/latent-slot-diffusion/',
+        img_size=256,
+        img_glob="**/*.png",
+        section='test',
+        predict_steps=1
+        # img_glob='*.out',
+    )
+
+
+
     # dataset = GlobDataset(
     #     root="/shared/s2/lab01/dataset/lsd/movi_/movi-e/movi-e-train-with-label/images/",
     #     # root='gs://gresearch/robotics/language_table/0.0.1/',
@@ -253,77 +373,77 @@ if __name__ == "__main__":
     #     data_portion=(0.0, 0.9)
     # )
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--predict_steps",
-        type=int,
-        default=4,
-        help="Number of images that should be predicted.",
-    )
-    parser.add_argument(
-        "--data_split",
-        type=str,
-        default='language_table_blocktoblock_4block_sim',
-        help="Data Split",
-        choices=['language_table_blocktoblock_4block_sim', 'language_table', 'language_table_sim', 'language_table_blocktoblock_sim',
-        'language_table_blocktoblock_oracle_sim', 'language_table_blocktoblockrelative_oracle_sim', 'language_table_blocktoabsolute_oracle_sim',
-        'language_table_blocktorelative_oracle_sim', 'language_table_separate_oracle_sim']
-    )
-
-    parser.add_argument(
-        "--section",
-        type=str,
-        default='train',
-        help="Train or Validation",
-        choices=['train', 'val']
-    )
-
-    args = parser.parse_args()
-
-    # dataset = GlobDataset(
-    #     root="/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_4block_sim/language_table_blocktoblock_4block_sim/language_table_blocktoblock_4block_sim-train-with-label/images/",
-    #     img_size=256,
-    #     img_glob="**/*.png",
-    #     data_portion=(0.0, 0.9)
+    # parser = argparse.ArgumentParser()
+    # parser.add_argument(
+    #     "--predict_steps",
+    #     type=int,
+    #     default=4,
+    #     help="Number of images that should be predicted.",
     # )
-    # pass
-    os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+    # parser.add_argument(
+    #     "--data_split",
+    #     type=str,
+    #     default='language_table_blocktoblock_4block_sim',
+    #     help="Data Split",
+    #     choices=['language_table_blocktoblock_4block_sim', 'language_table', 'language_table_sim', 'language_table_blocktoblock_sim',
+    #     'language_table_blocktoblock_oracle_sim', 'language_table_blocktoblockrelative_oracle_sim', 'language_table_blocktoabsolute_oracle_sim',
+    #     'language_table_blocktorelative_oracle_sim', 'language_table_separate_oracle_sim']
+    # )
 
-    dataset = GSDataset(
-        data_split=args.data_split,
-        section=args.section,
-        img_size=256,
-        predict_steps=args.predict_steps,
-    )
-    print(dataset)
+    # parser.add_argument(
+    #     "--section",
+    #     type=str,
+    #     default='train',
+    #     help="Train or Validation",
+    #     choices=['train', 'val']
+    # )
 
-    train_dataloader = torch.utils.data.DataLoader(
-                                                    dataset,
-                                                    batch_size=16,
-                                                    shuffle=True,
-                                                    num_workers=4,
-    )
-    for i, x in enumerate(train_dataloader):
-        if i >= 1:
-            break
-        print(x['x'][0], x['y'][0], x['ins'][0])
+    # args = parser.parse_args()
 
-    torch.save(dataset, f'/shared/s2/lab01/dataset/lsd/{args.data_split}_predict{args.predict_steps}_{args.section}.pth', pickle_protocol=4)
-    print("saved successfully")
+    # # dataset = GlobDataset(
+    # #     root="/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_4block_sim/language_table_blocktoblock_4block_sim/language_table_blocktoblock_4block_sim-train-with-label/images/",
+    # #     img_size=256,
+    # #     img_glob="**/*.png",
+    # #     data_portion=(0.0, 0.9)
+    # # )
+    # # pass
+    # os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
 
-    dataset_loaded = torch.load(f'/shared/s2/lab01/dataset/lsd/{args.data_split}_predict{args.predict_steps}_{args.section}.pth')
+    # dataset = GSDataset(
+    #     data_split=args.data_split,
+    #     section=args.section,
+    #     img_size=256,
+    #     predict_steps=args.predict_steps,
+    # )
+    # print(dataset)
 
-    train_dataloader = torch.utils.data.DataLoader(
-                                                    dataset_loaded,
-                                                    batch_size=16,
-                                                    shuffle=True,
-                                                    num_workers=4,
-    )
+    # train_dataloader = torch.utils.data.DataLoader(
+    #                                                 dataset,
+    #                                                 batch_size=16,
+    #                                                 shuffle=True,
+    #                                                 num_workers=4,
+    # )
+    # for i, x in enumerate(train_dataloader):
+    #     if i >= 1:
+    #         break
+    #     print(x['x'][0], x['y'][0], x['ins'][0])
 
-    for i, x in enumerate(train_dataloader):
-        if i >= 1:
-            break
-        print(x['x'][0], x['y'][0], x['ins'][0])
+    # torch.save(dataset, f'/shared/s2/lab01/dataset/lsd/{args.data_split}_predict{args.predict_steps}_{args.section}.pth', pickle_protocol=4)
+    # print("saved successfully")
+
+    # dataset_loaded = torch.load(f'/shared/s2/lab01/dataset/lsd/{args.data_split}_predict{args.predict_steps}_{args.section}.pth')
+
+    # train_dataloader = torch.utils.data.DataLoader(
+    #                                                 dataset_loaded,
+    #                                                 batch_size=16,
+    #                                                 shuffle=True,
+    #                                                 num_workers=4,
+    # )
+
+    # for i, x in enumerate(train_dataloader):
+    #     if i >= 1:
+    #         break
+    #     print(x['x'][0], x['y'][0], x['ins'][0])
 
     # train_dataloader = torch.utils.data.DataLoader(
     #     dataset,

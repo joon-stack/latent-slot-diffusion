@@ -287,6 +287,26 @@ def main(args):
         raise ValueError(
             f"Unknown unet config {args.unet_config}")
 
+    
+    if args.load_pretrain is not None:
+        load_model = UNetEncoder.from_pretrained(args.load_pretrain, subfolder='unetencoder')
+        backbone.register_to_config(**load_model.config)
+        backbone.load_state_dict(load_model.state_dict())
+        del load_model
+        print("UnetEncoder loaded")
+
+        load_model = MultiHeadSTEVESA.from_pretrained(args.load_pretrain, subfolder='MultiHeadSTEVESA'.lower())
+        slot_attn.register_to_config(**load_model.config)
+        slot_attn.load_state_dict(load_model.state_dict())
+        del load_model
+        print("MultiHeadSTEVESA loaded")
+
+        load_model = UNet2DConditionModelWithPos.from_pretrained(args.load_pretrain, subfolder='UNet2DConditionModelWithPos'.lower())
+        unet.register_to_config(**load_model.config)
+        unet.load_state_dict(load_model.state_dict())
+        del load_model
+        print("UNet2DConditionModelWithPos loaded")
+
     # create custom saving & loading hooks so that `accelerator.save_state(...)` serializes in a nice format
 
     def save_model_hook(models, weights, output_dir):
@@ -441,15 +461,101 @@ def main(args):
         optimizer, lr_lambda=[lambda _: 1, lambda _: 1] if train_unet else [lambda _: 1]
         )
 
-    train_dataset = GlobDataset(
-        root=args.dataset_root,
-        img_size=args.resolution,
-        img_glob=args.dataset_glob,
-        data_portion=(0.0, args.train_split_portion),
-        vit_norm=args.backbone_config == "pretrain_dino",
-        random_flip=args.flip_images,
-        vit_input_resolution=args.vit_input_resolution
-    )
+    if args.concat_dataset:
+        dataset_1 = GSLocalDataset(
+            root='/shared/s2/lab01/dataset/lsd/language_table',
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='train',
+            predict_steps=1,
+        )
+        dataset_2 = GSLocalDataset(
+            root='/shared/s2/lab01/dataset/lsd/language_table_sim',
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='train',
+            predict_steps=1,
+        )
+        dataset_3 = GSLocalDataset(
+            root='/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_sim',
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='train',
+            predict_steps=1,
+        )
+        dataset_4 = GSLocalDataset(
+            root='/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_4block_sim',
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='train',
+            predict_steps=1,
+        )
+
+        train_dataset = ConcatDataset([dataset_1, dataset_2, dataset_3, dataset_4])
+
+        val_dataset_1 = GSLocalDataset(
+            root='/shared/s2/lab01/dataset/lsd/language_table',
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='val',
+            predict_steps=1,
+        )
+        val_dataset_2 = GSLocalDataset(
+            root='/shared/s2/lab01/dataset/lsd/language_table_sim',
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='val',
+            predict_steps=1,
+        )
+        val_dataset_3 = GSLocalDataset(
+            root='/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_sim',
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='val',
+            predict_steps=1,
+        )
+        val_dataset_4 = GSLocalDataset(
+            root='/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_4block_sim',
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='val',
+            predict_steps=1,
+        )
+
+        val_dataset = ConcatDataset([val_dataset_1, val_dataset_2, val_dataset_3, val_dataset_4])
+
+
+
+
+
+        
+    else:
+
+        train_dataset = GSLocalDataset(
+            root=args.dataset_root,
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='train',
+            predict_steps=1,
+        )
+
+        val_dataset = GSLocalDataset(
+            root=args.dataset_root,
+            img_size=args.resolution,
+            img_glob=args.dataset_glob,
+            section='val',
+            predict_steps=1,
+        )   
+
+    # train_dataset = GlobDataset(
+    #     root=os.path.join(args.dataset_root, 'train'),
+    #     img_size=args.resolution,
+    #     img_glob=args.dataset_glob,
+    #     data_portion=(0.0, args.train_split_portion),
+    #     vit_norm=args.backbone_config == "pretrain_dino",
+    #     random_flip=args.flip_images,
+    #     vit_input_resolution=args.vit_input_resolution
+    # )
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -459,14 +565,14 @@ def main(args):
     )
 
     # validation set is only for visualization
-    val_dataset = GlobDataset(
-        root=args.dataset_root,
-        img_size=args.resolution,
-        img_glob=args.dataset_glob,
-        data_portion=(args.train_split_portion if args.train_split_portion < 1. else 0.9, 1.0),
-        vit_norm=args.backbone_config == "pretrain_dino",
-        vit_input_resolution=args.vit_input_resolution
-    )
+    # val_dataset = GlobDataset(
+    #     root=os.path.join(args.dataset_root, 'val'),
+    #     img_size=args.resolution,
+    #     img_glob=args.dataset_glob,
+    #     data_portion=(args.train_split_portion if args.train_split_portion < 1. else 0.9, 1.0),
+    #     vit_norm=args.backbone_config == "pretrain_dino",
+    #     vit_input_resolution=args.vit_input_resolution
+    # )
 
     # Scheduler and math around the number of training steps.
     overrode_max_train_steps = False
@@ -586,7 +692,7 @@ def main(args):
         slot_attn.train()
         for step, batch in enumerate(train_dataloader):
             pixel_values = batch["pixel_values"].to(dtype=weight_dtype)
-            print(pixel_values.shape)
+            
 
             # Convert images to latent space
             model_input = vae.encode(pixel_values).latent_dist.sample()
@@ -620,7 +726,7 @@ def main(args):
             slots, attn = slot_attn(feat[:, None])  # for the time dimension
             slots = slots[:, 0]
 
-            print(f"slots: {slots}, slots shpae: {slots.shape}")
+            
 
             if not train_unet:
                 slots = slots.to(dtype=weight_dtype)
