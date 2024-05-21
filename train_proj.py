@@ -509,28 +509,28 @@ def main(args):
 
     if args.concat_dataset:
         dataset_1 = GSLocalDataset(
-            root='/shared/s2/lab01/dataset/lsd/language_table',
+            root='//shared/youngjoon/langtable/language_table',
             img_size=args.resolution,
             img_glob=args.dataset_glob,
             section='train',
             predict_steps=1,
         )
         dataset_2 = GSLocalDataset(
-            root='/shared/s2/lab01/dataset/lsd/language_table_sim',
+            root='/shared/youngjoon/langtable/language_table_sim',
             img_size=args.resolution,
             img_glob=args.dataset_glob,
             section='train',
             predict_steps=1,
         )
         dataset_3 = GSLocalDataset(
-            root='/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_sim',
+            root='/shared/youngjoon/langtable/language_table_blocktoblock_sim',
             img_size=args.resolution,
             img_glob=args.dataset_glob,
             section='train',
             predict_steps=1,
         )
         dataset_4 = GSLocalDataset(
-            root='/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_4block_sim',
+            root='/shared/youngjoon/langtable/language_table_blocktoblock_4block_sim',
             img_size=args.resolution,
             img_glob=args.dataset_glob,
             section='train',
@@ -540,28 +540,28 @@ def main(args):
         train_dataset = ConcatDataset([dataset_1, dataset_2, dataset_3, dataset_4])
 
         val_dataset_1 = GSLocalDataset(
-            root='/shared/s2/lab01/dataset/lsd/language_table',
+            root='/shared/youngjoon/langtable/language_table',
             img_size=args.resolution,
             img_glob=args.dataset_glob,
             section='val',
             predict_steps=1,
         )
         val_dataset_2 = GSLocalDataset(
-            root='/shared/s2/lab01/dataset/lsd/language_table_sim',
+            root='/shared/youngjoon/langtable/language_table_sim',
             img_size=args.resolution,
             img_glob=args.dataset_glob,
             section='val',
             predict_steps=1,
         )
         val_dataset_3 = GSLocalDataset(
-            root='/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_sim',
+            root='/shared/youngjoon/langtable/language_table_blocktoblock_sim',
             img_size=args.resolution,
             img_glob=args.dataset_glob,
             section='val',
             predict_steps=1,
         )
         val_dataset_4 = GSLocalDataset(
-            root='/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_4block_sim',
+            root='/shared/youngjoon/langtable/language_table_blocktoblock_4block_sim',
             img_size=args.resolution,
             img_glob=args.dataset_glob,
             section='val',

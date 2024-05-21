@@ -41,16 +41,16 @@ class GSLocalDataset(Dataset):
         self.predict_steps = predict_steps
 
         tokenizer = BertTokenizerFast.from_pretrained("google-bert/bert-base-uncased")
-        print("Tokenizer loaded successfully")
+        # print("Tokenizer loaded successfully")
 
         model = BertModel.from_pretrained("google-bert/bert-base-uncased")
-        print("BERT loaded successfully")
+        # print("BERT loaded successfully")
 
         def extract_folder_name(file_path):
             return file_path.split('/')[-2]
 
         def encode(ins_list: list) -> torch.tensor:
-            tok = tokenizer(ins_list, padding=True, return_tensors='pt')
+            tok = tokenizer(ins_list, padding='max_length', truncation=True, max_length=24, return_tensors='pt')
             ins_list_cat = model(tok['input_ids'], tok['attention_mask']).last_hidden_state.detach().numpy()
             return ins_list_cat
             
@@ -245,10 +245,10 @@ class GSDataset(Dataset):
         print(f"{data_split} loaded successfully")
 
         tokenizer = BertTokenizerFast.from_pretrained("google-bert/bert-base-uncased")
-        print("Tokenizer loaded successfully")
+        # print("Tokenizer loaded successfully")
 
         model = BertModel.from_pretrained("google-bert/bert-base-uncased")
-        print("BERT loaded successfully")
+        # print("BERT loaded successfully")
 
         x_list = []
         y_list = []
@@ -279,7 +279,7 @@ class GSDataset(Dataset):
             
         x_list_cat = np.stack(x_list)
         y_list_cat = np.stack(y_list)
-        tok = tokenizer(ins_list, padding=True, truncation=True, return_tensors='pt')
+        tok = tokenizer(ins_list, padding='max_length', truncation=True, return_tensors='pt')
         ins_list_cat = model(tok['input_ids'], tok['attention_mask']).last_hidden_state.detach().numpy()
 
         self.length = ins_list_cat.shape[0]

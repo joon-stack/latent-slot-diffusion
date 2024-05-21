@@ -18,7 +18,7 @@ parser.add_argument(
 parser.add_argument(
     '--data_dir',
     type=str,
-    default="/shared/s2/lab01/dataset/lsd/langtable",
+    default="/shared/youngjoon/langtable",
     help='Directory to save the dataset'
 )
 

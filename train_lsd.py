@@ -24,6 +24,8 @@ from packaging import version
 from PIL import Image
 from tqdm.auto import tqdm
 
+from torch.utils.data import ConcatDataset
+
 import diffusers
 from diffusers import (
     AutoencoderKL,
@@ -40,7 +42,7 @@ from einops import rearrange, reduce, repeat
 from src.models.backbone import UNetEncoder
 from src.models.slot_attn import MultiHeadSTEVESA
 from src.models.unet_with_pos import UNet2DConditionModelWithPos
-from src.data.dataset import GlobDataset
+from src.data.dataset import GlobDataset, GSLocalDataset
 
 from src.parser import parse_args
 
@@ -82,7 +84,7 @@ def log_validation(
     val_dataloader = torch.utils.data.DataLoader(
         val_dataset,
         batch_size=args.val_batch_size,
-        shuffle=False,
+        shuffle=True,
         num_workers=args.dataloader_num_workers,
     )
 
@@ -462,64 +464,86 @@ def main(args):
         )
 
     if args.concat_dataset:
-        dataset_1 = GSLocalDataset(
-            root='/shared/s2/lab01/dataset/lsd/language_table',
-            img_size=args.resolution,
-            img_glob=args.dataset_glob,
-            section='train',
-            predict_steps=1,
+        dataset_1 = GlobDataset(
+                root='/shared/youngjoon/langtable/language_table/images/train',
+                img_size=args.resolution,
+                img_glob=args.dataset_glob,
+                data_portion=(0.0, 1.0),
+                vit_norm=args.backbone_config == "pretrain_dino",
+                random_flip=args.flip_images,
+                vit_input_resolution=args.vit_input_resolution
         )
-        dataset_2 = GSLocalDataset(
-            root='/shared/s2/lab01/dataset/lsd/language_table_sim',
-            img_size=args.resolution,
-            img_glob=args.dataset_glob,
-            section='train',
-            predict_steps=1,
+
+        dataset_2 = GlobDataset(
+                root='/shared/youngjoon/langtable/language_table_sim/images/train',
+                img_size=args.resolution,
+                img_glob=args.dataset_glob,
+                data_portion=(0.0, 1.0),
+                vit_norm=args.backbone_config == "pretrain_dino",
+                random_flip=args.flip_images,
+                vit_input_resolution=args.vit_input_resolution
         )
-        dataset_3 = GSLocalDataset(
-            root='/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_sim',
-            img_size=args.resolution,
-            img_glob=args.dataset_glob,
-            section='train',
-            predict_steps=1,
+
+        dataset_3 = GlobDataset(
+                root='/shared/youngjoon/langtable/language_table_blocktoblock_sim/images/train',
+                img_size=args.resolution,
+                img_glob=args.dataset_glob,
+                data_portion=(0.0, 1.0),
+                vit_norm=args.backbone_config == "pretrain_dino",
+                random_flip=args.flip_images,
+                vit_input_resolution=args.vit_input_resolution
         )
-        dataset_4 = GSLocalDataset(
-            root='/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_4block_sim',
-            img_size=args.resolution,
-            img_glob=args.dataset_glob,
-            section='train',
-            predict_steps=1,
+
+        dataset_4 = GlobDataset(
+                root='/shared/youngjoon/langtable/language_table_blocktoblock_4block_sim/images/train',
+                img_size=args.resolution,
+                img_glob=args.dataset_glob,
+                data_portion=(0.0, 1.0),
+                vit_norm=args.backbone_config == "pretrain_dino",
+                random_flip=args.flip_images,
+                vit_input_resolution=args.vit_input_resolution
         )
 
         train_dataset = ConcatDataset([dataset_1, dataset_2, dataset_3, dataset_4])
 
-        val_dataset_1 = GSLocalDataset(
-            root='/shared/s2/lab01/dataset/lsd/language_table',
-            img_size=args.resolution,
-            img_glob=args.dataset_glob,
-            section='val',
-            predict_steps=1,
+        val_dataset_1 = GlobDataset(
+                root='/shared/youngjoon/langtable/language_table/images/val',
+                img_size=args.resolution,
+                img_glob=args.dataset_glob,
+                data_portion=(0.0, 1.0),
+                vit_norm=args.backbone_config == "pretrain_dino",
+                random_flip=args.flip_images,
+                vit_input_resolution=args.vit_input_resolution
         )
-        val_dataset_2 = GSLocalDataset(
-            root='/shared/s2/lab01/dataset/lsd/language_table_sim',
-            img_size=args.resolution,
-            img_glob=args.dataset_glob,
-            section='val',
-            predict_steps=1,
+
+        val_dataset_2 = GlobDataset(
+                root='/shared/youngjoon/langtable/language_table_sim/images/val',
+                img_size=args.resolution,
+                img_glob=args.dataset_glob,
+                data_portion=(0.0, 1.0),
+                vit_norm=args.backbone_config == "pretrain_dino",
+                random_flip=args.flip_images,
+                vit_input_resolution=args.vit_input_resolution
         )
-        val_dataset_3 = GSLocalDataset(
-            root='/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_sim',
-            img_size=args.resolution,
-            img_glob=args.dataset_glob,
-            section='val',
-            predict_steps=1,
+
+        val_dataset_3 = GlobDataset(
+                root='/shared/youngjoon/langtable/language_table_blocktoblock_sim/images/val',
+                img_size=args.resolution,
+                img_glob=args.dataset_glob,
+                data_portion=(0.0, 1.0),
+                vit_norm=args.backbone_config == "pretrain_dino",
+                random_flip=args.flip_images,
+                vit_input_resolution=args.vit_input_resolution
         )
-        val_dataset_4 = GSLocalDataset(
-            root='/shared/s2/lab01/dataset/lsd/language_table_blocktoblock_4block_sim',
-            img_size=args.resolution,
-            img_glob=args.dataset_glob,
-            section='val',
-            predict_steps=1,
+
+        val_dataset_4 = GlobDataset(
+                root='/shared/youngjoon/langtable/language_table_blocktoblock_4block_sim/images/val',
+                img_size=args.resolution,
+                img_glob=args.dataset_glob,
+                data_portion=(0.0, 1.0),
+                vit_norm=args.backbone_config == "pretrain_dino",
+                random_flip=args.flip_images,
+                vit_input_resolution=args.vit_input_resolution
         )
 
         val_dataset = ConcatDataset([val_dataset_1, val_dataset_2, val_dataset_3, val_dataset_4])
@@ -531,21 +555,25 @@ def main(args):
         
     else:
 
-        train_dataset = GSLocalDataset(
-            root=args.dataset_root,
+        train_dataset = GlobDataset(
+            root=os.path.join(args.dataset_root, 'train'),
             img_size=args.resolution,
             img_glob=args.dataset_glob,
-            section='train',
-            predict_steps=1,
+            data_portion=(0.0, 1.0),
+            vit_norm=args.backbone_config == "pretrain_dino",
+            random_flip=args.flip_images,
+            vit_input_resolution=args.vit_input_resolution
         )
 
-        val_dataset = GSLocalDataset(
-            root=args.dataset_root,
+        val_dataset = GlobDataset(
+            root=os.path.join(args.dataset_root, 'val'),
             img_size=args.resolution,
             img_glob=args.dataset_glob,
-            section='val',
-            predict_steps=1,
-        )   
+            data_portion=(0.0, 1.0),
+            vit_norm=args.backbone_config == "pretrain_dino",
+            random_flip=args.flip_images,
+            vit_input_resolution=args.vit_input_resolution
+        )
 
     # train_dataset = GlobDataset(
     #     root=os.path.join(args.dataset_root, 'train'),

@@ -3,12 +3,12 @@ import random
 import shutil
 
 # 원본 폴더 경로
-source_dir = '/shared/s2/lab01/dataset/lsd/language_table/language_table-train-with-label/labels'  # 00000001 ~ 00008297 폴더들이 있는 경로
+source_dir = '/shared/youngjoon/langtable/language_table/language_table-train-with-label/images'  # 00000001 ~ 00008297 폴더들이 있는 경로
 
 # 목적지 폴더 경로
-train_dir = '/shared/s2/lab01/dataset/lsd/language_table/labels/train'
-val_dir = '/shared/s2/lab01/dataset/lsd/language_table/labels/val'
-test_dir = '/shared/s2/lab01/dataset/lsd/language_table/labels/test'
+train_dir = '/shared/youngjoon/langtable/language_table/images/train'
+val_dir = '/shared/youngjoon/langtable/language_table/images/val'
+test_dir = '/shared/youngjoon/langtable/language_table/images/test'
 
 # 목적지 폴더가 없다면 생성
 os.makedirs(train_dir, exist_ok=True)
@@ -16,11 +16,11 @@ os.makedirs(val_dir, exist_ok=True)
 os.makedirs(test_dir, exist_ok=True)
 
 # 원본 폴더 목록 가져오기
-files = [f for f in os.listdir(source_dir) if f.endswith('.npy')]
-files.sort()
-
-# files = [f for f in os.listdir(source_dir) if os.path.isdir(os.path.join(source_dir, f))]
+# files = [f for f in os.listdir(source_dir) if f.endswith('.npy')]
 # files.sort()
+
+files = [f for f in os.listdir(source_dir) if os.path.isdir(os.path.join(source_dir, f))]
+files.sort()
 
 # 셔플링
 random.seed(42)  # 재현성을 위해 고정된 시드 사용
