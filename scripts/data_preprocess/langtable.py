@@ -22,6 +22,13 @@ parser.add_argument(
     help='Directory to save the dataset'
 )
 
+parser.add_argument(
+    '--data_size',
+    type=int,
+    default=8000,
+    help='Data size to download'
+)
+
 args = parser.parse_args()
 
 # ds = tfds.load("movi_e", data_dir="gs://kubric-public/tfds") 
@@ -77,7 +84,7 @@ for section in ["train", "validation", "test"]:
         position=0, leave=True
     )
     for i, record in enumerate(data_iter):
-        if i >= 8000:
+        if i >= args.data_size:
             break
         path_vid_images = os.path.join(out_path_images, f"{i:08}")
         os.makedirs(path_vid_images, exist_ok=True)

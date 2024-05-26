@@ -5,7 +5,7 @@ import torchvision
 import numpy as np
 from PIL import Image
 from torchvision import transforms
-from torch.utils.data import Dataset, TensorDataset, DataLoader
+from torch.utils.data import Dataset, TensorDataset, DataLoader, ConcatDataset
 
 import argparse
 
@@ -350,16 +350,82 @@ class GSDataset(Dataset):
         return example
 
 if __name__ == "__main__":
-    dataset = GSLocalDataset(
-        root="/shared/s2/lab01/dataset/lsd/language_table",
-        # root='gs://gresearch/robotics/language_table/0.0.1/',
-        # root='/home/s2/youngjoonjeong/github/latent-slot-diffusion/',
+
+    dataset_1 = GSLocalDataset(
+            root='/shared/youngjoon/langtable/language_table',
+            img_size=256,
+            img_glob="**/*.png",
+            section='train',
+            predict_steps=1,
+        )
+    # dataset_2 = GSLocalDataset(
+    #     root='/shared/youngjoon/langtable/language_table_sim',
+    #     img_size=256,
+    #     img_glob="**/*.png",
+    #     section='train',
+    #     predict_steps=1,
+    # )
+    # dataset_3 = GSLocalDataset(
+    #     root='/shared/youngjoon/langtable/language_table_blocktoblock_sim',
+    #     img_size=256,
+    #     img_glob="**/*.png",
+    #     section='train',
+    #     predict_steps=1,
+    # )
+    # dataset_4 = GSLocalDataset(
+    #     root='/shared/youngjoon/langtable/language_table_blocktoblock_4block_sim',
+    #     img_size=256,
+    #     img_glob="**/*.png",
+    #     section='train',
+    #     predict_steps=1,
+    # )
+
+    # train_dataset = ConcatDataset([dataset_1, dataset_2, dataset_3, dataset_4])
+
+    val_dataset_1 = GSLocalDataset(
+        root='/shared/youngjoon/langtable/language_table',
         img_size=256,
         img_glob="**/*.png",
-        section='test',
-        predict_steps=1
-        # img_glob='*.out',
+        section='val',
+        predict_steps=1,
     )
+    # val_dataset_2 = GSLocalDataset(
+    #     root='/shared/youngjoon/langtable/language_table_sim',
+    #     img_size=256,
+    #     img_glob="**/*.png",
+    #     section='val',
+    #     predict_steps=1,
+    # )
+    # val_dataset_3 = GSLocalDataset(
+    #     root='/shared/youngjoon/langtable/language_table_blocktoblock_sim',
+    #     img_size=256,
+    #     img_glob="**/*.png",
+    #     section='val',
+    #     predict_steps=1,
+    # )
+    # val_dataset_4 = GSLocalDataset(
+    #     root='/shared/youngjoon/langtable/language_table_blocktoblock_4block_sim',
+    #     img_size=256,
+    #     img_glob="**/*.png",
+    #     section='val',
+    #     predict_steps=1,
+    # )
+
+    # val_dataset = ConcatDataset([val_dataset_1, val_dataset_2, val_dataset_3, val_dataset_4])
+
+    torch.save(dataset_1, '/shared/youngjoon/trn_single.pth', pickle_protocol=4)
+    torch.save(val_dataset_1, '/shared/youngjoon/val_single.pth', pickle_protocol=4)
+    # print("saved successfully")
+    # dataset = GSLocalDataset(
+    #     root="/shared/s2/lab01/dataset/lsd/language_table",
+    #     # root='gs://gresearch/robotics/language_table/0.0.1/',
+    #     # root='/home/s2/youngjoonjeong/github/latent-slot-diffusion/',
+    #     img_size=256,
+    #     img_glob="**/*.png",
+    #     section='test',
+    #     predict_steps=1
+    #     # img_glob='*.out',
+    # )
 
 
 

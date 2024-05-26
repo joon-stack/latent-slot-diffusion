@@ -88,6 +88,19 @@ def greedy_match(a, b):
     
     return matched_indices
 
+def greedy_match_no_overlap(a, b):
+    assert a.shape == b.shape, "Shape of a and b must be the same"
+    
+    batch_size = a.shape[0]
+    a = a.float()
+    b = b.float()
+    # 각 요소 간의 거리 계산
+    distances = torch.cdist(a.reshape(batch_size, -1), b.reshape(batch_size, -1), p=2)  # [batch_size, batch_size]    
+    
+    # 각 행에서 최소 거리 인덱스 찾기
+    min_indices = torch.argmin(distances, dim=1)
+    
+    return min_indices.tolist()
 
 @torch.no_grad()
 def log_validation(
@@ -372,7 +385,7 @@ def main(args):
                     input_dir, subfolder=sub_dir)
                 model.register_to_config(**load_model.config)
             elif isinstance(model, LatentPredictor):
-                model = LatentPredictor(latent_size=192)
+                model = LatentPredictor(latent_size=768, slot_size=192)
             else:
                 raise ValueError(
                     f"Unknown model type {type(model)}")
@@ -575,6 +588,11 @@ def main(args):
 
 
         
+    elif args.load_local:
+        print("Loading locally saved data.........")
+        train_dataset = torch.load('/shared/youngjoon/trn.pth')
+        val_dataset = torch.load('/shared/youngjoon/val.pth')
+    
     else:
 
         train_dataset = GSLocalDataset(
@@ -592,6 +610,9 @@ def main(args):
             section='val',
             predict_steps=1,
         )
+
+    # torch.save(dataset, f'/shared/s2/lab01/dataset/lsd/{args.data_split}_predict{args.predict_steps}_{args.section}.pth', pickle_protocol=4)
+    # print("saved successfully")
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -883,8 +904,10 @@ def main(args):
                 slots_y = slots_y.permute(1, 0, 2)
                 model_pred = model_pred.permute(1, 0, 2)
                 # print(model_pred.shape, slots_y.shape)
+
                 idx = greedy_match(model_pred, slots_y)
-                
+                # idx = greedy_match_no_overlap(model_pred, slots_y)
+                # print(idx)
                 slots_y = slots_y[idx]
                 
                 

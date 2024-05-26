@@ -30,8 +30,16 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--concat_dataset",
         action="store_true",
-        default=True,
+        default=False,
         help="Whether or not to use concat dataset",
+        
+    )
+
+    parser.add_argument(
+        "--load_local",
+        action="store_true",
+        default=False,
+        help="Whether or not to load locally saved dataset",
         
     )
 
